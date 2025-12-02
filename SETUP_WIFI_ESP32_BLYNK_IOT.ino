@@ -10,16 +10,18 @@
 bool blynkConnect = 0;
 WidgetRTC rtc;
 
+// --- THÊM: Widget Terminal để hiện chữ lên điện thoại ---
+WidgetTerminal terminal(V9);
+
 // --- 1. CẤU HÌNH PHẦN CỨNG ---
 const int ledPins[] = {14, 27, 26, 25}; // Thứ tự: Đèn 1, 2, 3, 4
 const int numLeds = 4;
-bool ledBlinkingState[numLeds] = {false, false, false, false};
 
-// --- 2. BIẾN NHẤP NHÁY & SÓNG ---
-unsigned long lastBlinkTime = 0;
-const long blinkInterval = 500;
-bool blinkStatus = LOW;
+// Mảng lưu trạng thái BẬT/TẮT của đèn (True = Sáng, False = Tắt)
+bool ledState[numLeds] = {false, false, false, false};
 
+// --- 2. BIẾN HIỆU ỨNG SÓNG (V5) ---
+// (Vẫn giữ lại hiệu ứng sóng nếu bạn muốn dùng)
 bool waveEffectActive = false;           
 unsigned long lastWaveStepTime = 0;      
 const long waveStepInterval = 200;       
@@ -28,8 +30,15 @@ int currentWaveLed = 0;
 // --- 3. BIẾN HẸN GIỜ ---
 long timeOnSeconds = -1;  
 long timeOffSeconds = -1; 
-int targetLamp = 1; // Mặc định hẹn giờ cho Đèn 1 (nếu không điền gì)
+int targetLamp = 1; // Mặc định hẹn giờ cho Đèn 1
 
+
+// --- HÀM HỖ TRỢ: Gửi thông báo ---
+void logToPhone(String msg) {
+  Serial.println(msg);      
+  terminal.println(msg);    
+  terminal.flush();         
+}
 
 // --- HÀM HỖ TRỢ: ĐỔI CHUỖI SANG GIÂY ---
 long parseTimeStringToSeconds(String timeStr) {
@@ -45,16 +54,25 @@ long parseTimeStringToSeconds(String timeStr) {
 }
 
 BLYNK_CONNECTED() {
-  // Đồng bộ tất cả, bao gồm cả V8
   Blynk.syncVirtual(V1, V2, V3, V4, V5, V6, V7, V8);
   rtc.begin(); 
+  terminal.clear();
+  terminal.println(F("--- HE THONG SAN SANG (CHE DO TINH) ---"));
+  terminal.flush();
 }
 
-// --- CÁC HÀM ĐIỀU KHIỂN (V1-V4) ---
+// --- CÁC HÀM ĐIỀU KHIỂN (V1-V4) - CHẾ ĐỘ SÁNG CỐ ĐỊNH ---
 void updateLedState(int index, int value) {
-  ledBlinkingState[index] = (value == 1);
-  if (!ledBlinkingState[index] && !waveEffectActive) {
-    digitalWrite(ledPins[index], LOW);
+  // Cập nhật trạng thái logic
+  ledState[index] = (value == 1);
+  
+  // Nếu KHÔNG chạy hiệu ứng sóng thì bật/tắt đèn vật lý NGAY LẬP TỨC
+  if (!waveEffectActive) {
+    if (ledState[index]) {
+      digitalWrite(ledPins[index], HIGH); // Bật đèn sáng luôn
+    } else {
+      digitalWrite(ledPins[index], LOW);  // Tắt đèn luôn
+    }
   }
 }
 
@@ -63,27 +81,38 @@ BLYNK_WRITE(V2) { updateLedState(1, param.asInt()); }
 BLYNK_WRITE(V3) { updateLedState(2, param.asInt()); }
 BLYNK_WRITE(V4) { updateLedState(3, param.asInt()); }
 
+// --- ĐIỀU KHIỂN HIỆU ỨNG SÓNG (V5) ---
 BLYNK_WRITE(V5) {
   waveEffectActive = (param.asInt() == 1);
   if (waveEffectActive) {
+     // Khi bắt đầu sóng: Tắt hết đèn nền để chạy hiệu ứng
      for(int i=0; i<numLeds; i++) digitalWrite(ledPins[i], LOW);
      currentWaveLed = 0;
      lastWaveStepTime = millis();
+     logToPhone("-> Che do SONG: BAT");
   } else {
-     for(int i=0; i<numLeds; i++) digitalWrite(ledPins[i], LOW);
+     // Khi tắt sóng: Tắt hết đèn
+     for(int i=0; i<numLeds; i++) {
+       digitalWrite(ledPins[i], LOW);
+       ledState[i] = false; // Reset trạng thái logic về tắt
+       // Cập nhật lại nút trên App về OFF
+       int vPin = i + 1; // V1, V2... tương ứng index 0, 1...
+       Blynk.virtualWrite(vPin, 0);
+     }
+     logToPhone("-> Che do SONG: TAT");
   }
 }
 
-// --- XỬ LÝ NHẬP GIỜ (V6, V7) ---
+// --- XỬ LÝ NHẬP GIỜ (V6, V7, V8) ---
 BLYNK_WRITE(V6) {
   String inputStr = param.asStr(); 
   long result = parseTimeStringToSeconds(inputStr);
   if (result != -1) {
     timeOnSeconds = result;
-    Serial.print("-> Hen gio BAT: "); Serial.println(inputStr);
+    logToPhone("-> Hen gio BAT: " + inputStr);
   } else {
     timeOnSeconds = -1;
-    Serial.println("-> Huy hen gio BAT");
+    logToPhone("-> Huy hen gio BAT");
   }
 }
 
@@ -92,30 +121,25 @@ BLYNK_WRITE(V7) {
   long result = parseTimeStringToSeconds(inputStr);
   if (result != -1) {
     timeOffSeconds = result;
-    Serial.print("-> Hen gio TAT: "); Serial.println(inputStr);
+    logToPhone("-> Hen gio TAT: " + inputStr);
   } else {
     timeOffSeconds = -1;
-    Serial.println("-> Huy hen gio TAT");
+    logToPhone("-> Huy hen gio TAT");
   }
 }
 
-// --- XỬ LÝ CHỌN ĐÈN (V8) ---
-// Người dùng nhập số "1", "2", "3", "4" vào ô Text Input V8
 BLYNK_WRITE(V8) {
   String inputStr = param.asStr();
-  int val = inputStr.toInt(); // Chuyển chuỗi thành số
-  
-  // Kiểm tra xem số có hợp lệ không (chỉ chấp nhận 1, 2, 3, 4)
+  int val = inputStr.toInt(); 
   if (val >= 1 && val <= 4) {
     targetLamp = val;
-    Serial.print("-> Da chon den de hen gio: Den "); 
-    Serial.println(targetLamp);
+    logToPhone("-> Chon hen gio: Den " + String(targetLamp));
   } else {
-    Serial.println("-> Loi: Chi duoc nhap so tu 1 den 4!");
+    logToPhone("-> Loi: Chi nhap so 1-4!");
   }
 }
 
-// --- LOGIC HẸN GIỜ (Sửa đổi để hỗ trợ chọn đèn) ---
+// --- LOGIC HẸN GIỜ ---
 void handleTimer() {
   if (year() < 2020) return; 
 
@@ -123,24 +147,18 @@ void handleTimer() {
   long targetOnMinutes = (timeOnSeconds != -1) ? timeOnSeconds / 60 : -1;
   long targetOffMinutes = (timeOffSeconds != -1) ? timeOffSeconds / 60 : -1;
 
-  // Xác định chỉ số mảng (0-3) từ số đèn (1-4)
   int ledIndex = targetLamp - 1; 
-  
-  // Xác định Virtual Pin tương ứng (V1 là 1, V2 là 2...)
-  // Trong Blynk library, V1 thực chất là số 1, V2 là 2...
-  int vPin = targetLamp; 
+  int vPin = targetLamp; // V1, V2, V3, V4 tương ứng số 1,2,3,4
 
   // 1. Kiểm tra giờ BẬT
   if (targetOnMinutes != -1) {
     if (currentMinutes == targetOnMinutes) {
-      if (ledBlinkingState[ledIndex] == false) {
-        ledBlinkingState[ledIndex] = true; 
-        
-        // Cập nhật trạng thái nút trên App (V1, V2, V3 hoặc V4)
+      if (ledState[ledIndex] == false) {
+        // Gọi hàm updateLedState để bật đèn
+        updateLedState(ledIndex, 1);
+        // Cập nhật nút trên App
         Blynk.virtualWrite(vPin, 1);  
-        
-        Serial.print("-> DEN GIO: BAT DEN ");
-        Serial.println(targetLamp);
+        logToPhone("-> DEN GIO: BAT DEN " + String(targetLamp));
       }
     }
   }
@@ -148,41 +166,28 @@ void handleTimer() {
   // 2. Kiểm tra giờ TẮT
   if (targetOffMinutes != -1) {
     if (currentMinutes == targetOffMinutes) {
-      if (ledBlinkingState[ledIndex] == true) {
-        ledBlinkingState[ledIndex] = false;   
-        
-        // Cập nhật trạng thái nút trên App
+      if (ledState[ledIndex] == true) {
+        // Gọi hàm updateLedState để tắt đèn
+        updateLedState(ledIndex, 0);
+        // Cập nhật nút trên App
         Blynk.virtualWrite(vPin, 0);     
-        digitalWrite(ledPins[ledIndex], LOW); 
-        
-        Serial.print("-> DEN GIO: TAT DEN ");
-        Serial.println(targetLamp);
+        logToPhone("-> DEN GIO: TAT DEN " + String(targetLamp));
       }
     }
   }
 }
 
-void handleBlinking() {
-  if (waveEffectActive) return; 
-  bool anyBlinking = false;
-  for (int i=0; i<numLeds; i++) if(ledBlinkingState[i]) anyBlinking=true;
-  if (!anyBlinking) return;
-
-  if (millis() - lastBlinkTime >= blinkInterval) {
-    lastBlinkTime = millis();
-    blinkStatus = !blinkStatus; 
-    for (int i=0; i<numLeds; i++) {
-      if(ledBlinkingState[i]) digitalWrite(ledPins[i], blinkStatus);
-    }
-  }
-}
-
+// --- LOGIC HIỆU ỨNG SÓNG ---
 void handleWaveEffect() {
   if (!waveEffectActive) return;
+  
   if (millis() - lastWaveStepTime >= waveStepInterval) {
     lastWaveStepTime = millis();
+    // Tắt đèn cũ
     for (int i=0; i<numLeds; i++) digitalWrite(ledPins[i], LOW);
+    // Bật đèn mới
     digitalWrite(ledPins[currentWaveLed], HIGH);
+    
     currentWaveLed++;
     if (currentWaveLed >= numLeds) currentWaveLed = 0; 
   }
@@ -207,7 +212,7 @@ void loop() {
     if (blynkConnect) {
       Blynk.run();
       handleTimer();       
-      handleBlinking();    
+      // Đã xóa handleBlinking() vì không dùng nữa
       handleWaveEffect();  
     }
   }
